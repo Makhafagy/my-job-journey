@@ -1,0 +1,13 @@
+# Ignore all CSV files
+# This is important to keep your personal application data private.
+*.csv
+
+# Ignore Python specific files
+__pycache__/
+*.pyc
+
+# Ignore virtual environment folder
+.venv/
+
+# Ignore IDE/editor-specific folders
+.vscode/

@@ -11,3 +11,5 @@ __pycache__/
 
 # Ignore IDE/editor-specific folders
 .vscode/
+
+past_applied_data/

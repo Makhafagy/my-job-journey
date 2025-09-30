@@ -1,4 +1,4 @@
-# 🚀 My Job Journey: An Automated Application Tracker
+# 🚀 An Automated Application Tracker
 
 This project provides a suite of Python and Google Apps scripts to automate the process of finding, filtering, and analyzing new-graduate software engineering job applications. It transforms the job hunt from a chaotic spreadsheet nightmare into a streamlined, data-driven workflow.
 

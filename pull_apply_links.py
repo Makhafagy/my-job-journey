@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # pull_apply_links.py
 import csv
 import re
@@ -6,6 +7,9 @@ import urllib.parse
 from typing import Dict, List, Optional, Set, Tuple
 import os
 import argparse
+import shutil
+
+import prepare_tracker
 
 import requests
 from bs4 import BeautifulSoup
@@ -64,9 +68,9 @@ def strip_tracking(u: str) -> str:
     try:
         p = urllib.parse.urlparse(u)
     except Exception:
-        return u
+        return u or ""
     if not p.query:
-        return u
+        return u or ""
     keep = []
     for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True):
         lk, lv = (k or "").lower(), (v or "").lower()
@@ -89,10 +93,10 @@ def is_direct_ats(u: str) -> bool:
 
 def norm_url_for_dedupe(u: str) -> str:
     try:
-        p = urllib.parse.urlparse(u)
+        p = urllib.parse.urlparse(u or "")
         return urllib.parse.urlunparse((
-            p.scheme.lower(), p.netloc.lower(), p.path.rstrip("/"),
-            "", p.query, ""
+            (p.scheme or "https").lower(), (p.netloc or "").lower(), (p.path or "").rstrip("/"),
+            "", p.query or "", ""
         ))
     except Exception:
         return (u or "").rstrip("/").lower()
@@ -270,26 +274,64 @@ def dedupe(rows: List[Dict]) -> List[Dict]:
 def load_applied_urls(applied_csv_path: str) -> Set[str]:
     """Reads the CSV with application tracking and returns a set of normalized URLs for jobs already applied to."""
     applied_urls = set()
-    if not os.path.exists(applied_csv_path):
-        print(f"Info: Applied jobs file not found at '{applied_csv_path}'. Skipping.")
+    if not applied_csv_path or not os.path.exists(applied_csv_path):
+        # missing file is not an error; upstream code will handle empty set
         return applied_urls
 
     try:
         with open(applied_csv_path, "r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            # Normalize field names by lowercasing and stripping whitespace
-            reader.fieldnames = [name.lower().strip() for name in reader.fieldnames]
+            if not reader.fieldnames:
+                return applied_urls
+            # Normalize field names: use lowercase mapping to original header strings
+            header_map = {name.lower().strip(): name for name in reader.fieldnames}
+            applied_key = header_map.get("applied", None)
+            url_key = header_map.get("apply_url", None)
+            # fallback: try to find any column with 'url' or 'link' in the name
+            if not url_key:
+                for k_lower, orig in header_map.items():
+                    if "url" in k_lower or "link" in k_lower:
+                        url_key = orig
+                        break
             for row in reader:
-                # Check for 'applied' column, case-insensitive
-                if row.get("applied", "").strip().upper() == "TRUE":
-                    url = row.get("apply_url")
-                    if url:
-                        applied_urls.add(norm_url_for_dedupe(url))
-    except Exception as e:
-        print(f"Warning: Could not read applied jobs file '{applied_csv_path}'. Error: {e}")
+                if applied_key:
+                    if (row.get(applied_key) or "").strip().upper() != "TRUE":
+                        continue
+                else:
+                    # if no 'applied' column, don't mark anything as applied
+                    continue
+                if not url_key:
+                    continue
+                url = row.get(url_key)
+                if url:
+                    applied_urls.add(norm_url_for_dedupe(strip_tracking(url)))
+    except Exception:
+        # on read error, return empty applied set (safe fallback)
+        return set()
 
-    print(f"Found {len(applied_urls)} previously applied jobs.")
     return applied_urls
+
+# ---------- Archive helper ----------
+def archive_file(src_path: str, dest_dir: str, base_name: str) -> Optional[str]:
+    """
+    Move src_path into dest_dir with an incremented suffix.
+    Returns the new destination path or None on failure.
+    """
+    if not os.path.exists(src_path):
+        return None
+    os.makedirs(dest_dir, exist_ok=True)
+    # find next index
+    idx = 1
+    while True:
+        candidate = os.path.join(dest_dir, f"{base_name}_{idx}.csv")
+        if not os.path.exists(candidate):
+            break
+        idx += 1
+    try:
+        shutil.move(src_path, candidate)
+        return candidate
+    except Exception:
+        return None
 
 # ---------- Enhanced filtering function ----------
 def is_us_location(location: str) -> bool:
@@ -306,11 +348,11 @@ def is_us_location(location: str) -> bool:
 
     # Check for state codes using regex to match whole words
     # This avoids matching "CA" in "Canada"
-    if any(re.search(r'\b' + code + r'\b', loc_upper) for code in US_STATE_CODES):
+    if any(re.search(r'\b' + re.escape(code) + r'\b', loc_upper) for code in US_STATE_CODES):
         return True
 
     # Heuristic for "Remote" - include if it doesn't mention a non-US country
-    if "REMOTE" in loc_upper:
+    if "REMOTE" in loc_upper and not any(k.upper() in loc_upper for k in NON_US_KEYWORDS):
         return True
 
     # Default to excluding if no positive US indicators are found
@@ -355,31 +397,27 @@ def sort_rows(rows: List[Dict]) -> List[Dict]:
 
 # ---------- Main ----------
 def main():
-    # Argument Parsing for job age
     parser = argparse.ArgumentParser(description="Scrape and filter new-grad SWE jobs.")
-    parser.add_argument(
-        "--days",
-        type=int,
-        default=7,
-        help="Max age of the job posting in days (default: 7)."
-    )
+    parser.add_argument("--days", type=int, default=7, help="Max age of the job posting in days (default: 7).")
+    parser.add_argument("--applied", type=str, default="new_grad_swe_apply_links_applying.csv", help="CSV path with your applied jobs (Applied=TRUE).")
+    parser.add_argument("--out", type=str, default="new_grad_swe_apply_links.csv", help="Output CSV path.")
+    parser.add_argument("--archive-dir", type=str, default="past", help="Directory to archive the applied CSV into.")
+    parser.add_argument("--no-archive", action="store_true", help="Don't archive the applied CSV after processing.")
     args = parser.parse_args()
+
     max_age_days = args.days
+    applied_csv = args.applied
+    out_csv = args.out
+    archive_dir = args.archive_dir
+    no_archive = args.no_archive
 
-    # Define input (your sheet) and output (new filtered list) filenames
-    applied_csv = "new_grad_swe_apply_links_applying.csv"
-    # Update output file path logic to work around argparse consuming positional args
-    if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
-        out_csv = sys.argv[1]
-    else:
-        out_csv = "new_grad_swe_apply_links.csv"
-
-
-    # --- Pipeline updated ---
+    # load applied URLs from the CSV you downloaded from Google Sheets
     applied_urls = load_applied_urls(applied_csv)
+
+    # fetch and parse
     rows = load_active_swe_rows()
     rows = dedupe(rows)
-    rows = filter_rows(rows, applied_urls, max_age_days)  # Pass max_age_days
+    rows = filter_rows(rows, applied_urls, max_age_days)
     rows = sort_rows(rows)
 
     # Defaults & cleanup
@@ -391,6 +429,7 @@ def main():
         if r.get("age") is None:
             r["age"] = ""
 
+    # write output CSV
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
@@ -399,10 +438,25 @@ def main():
             out["flags"] = flags_emoji_row(r)
             w.writerow(out)
 
-    # Update print statement to reflect the actual max age used
+    # archive the applied CSV (move into past/ with incrementing suffix)
+    archived_path = None
+    if not no_archive and applied_csv and os.path.exists(applied_csv):
+        base = os.path.splitext(os.path.basename(applied_csv))[0]
+        archived_path = archive_file(applied_csv, archive_dir, base)
+
+    # Summary
     print(f"✅ Wrote {len(rows)} new, filtered, direct ATS links to {out_csv}")
-    print(f"   - Ignored {len(applied_urls)} jobs you already applied to.")
+    print(f"   - Used applied CSV: {applied_csv} (found {len(applied_urls)} applied entries).")
+    if archived_path:
+        print(f"   - Archived applied CSV to: {archived_path}")
+    elif not no_archive:
+        print("   - No applied CSV found to archive.")
+    else:
+        print("   - Archiving skipped (--no-archive).")
     print(f"   - Kept only jobs in the US posted in the last {max_age_days} days.")
+
+    # Ensure the master CSV has the tracking columns
+    prepare_tracker.prepare_master_file(out_csv)
 
 if __name__ == "__main__":
     main()

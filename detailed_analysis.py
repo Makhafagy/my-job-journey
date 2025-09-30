@@ -1,101 +1,231 @@
+#!/usr/bin/env python3
+"""
+detailed_analysis.py
+
+Loads current applying CSV + all past CSVs, dedupes by normalized apply_url,
+detects applied rows and statuses, prints a formatted terminal report and
+writes application_analysis.csv.
+
+Run:
+    python detailed_analysis.py
+"""
 import csv
 import os
-from collections import defaultdict
-import datetime
+import sys
+import urllib.parse
+from collections import defaultdict, Counter
+from typing import List, Dict, Tuple
 
-def load_all_application_data(current_file, past_folder):
-    """
-    Loads and combines application data from the current file and all CSVs in a past data folder.
-    Removes duplicates based on the 'apply_url'.
-    """
-    all_applications = {} # Use a dictionary to handle duplicates automatically
+CURRENT_APPLICATIONS_FILE = "new_grad_swe_apply_links_applying.csv"
+PAST_DATA_FOLDER = "past_applied_data"
+OUTPUT_CSV = "application_analysis.csv"
+APPLIED_TRUE = {"TRUE", "YES", "Y", "1"}
+STATUS_KEYWORDS = ("appl", "submitted", "interview", "offer", "accepted", "hired")
 
-    # List of files to process
-    files_to_process = []
+# --- helpers (same as count script, but packaged here) ---
+def load_csv_rows(path: str) -> List[Dict[str, str]]:
+    rows = []
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                rows.append({(k or "").strip(): (v or "").strip() for k, v in r.items()})
+    except Exception as e:
+        print(f"Warning: could not read {path}: {e}", file=sys.stderr)
+    return rows
+
+def gather_files(current_file: str, past_folder: str) -> List[str]:
+    files = []
     if os.path.exists(current_file):
-        files_to_process.append(current_file)
+        files.append(current_file)
+    if os.path.isdir(past_folder):
+        for p in sorted(os.listdir(past_folder)):
+            if p.lower().endswith(".csv"):
+                files.append(os.path.join(past_folder, p))
+    return files
 
-    # Add files from the past_applied_data folder
-    if os.path.exists(past_folder):
-        for filename in os.listdir(past_folder):
-            if filename.endswith('.csv'):
-                files_to_process.append(os.path.join(past_folder, filename))
+def detect_key_by_names(fieldnames: List[str], candidates: Tuple[str, ...]) -> str:
+    low_map = { (h or "").strip().lower(): h for h in fieldnames }
+    for cand in candidates:
+        if cand in low_map:
+            return low_map[cand]
+    return ""
 
-    # Process all found files
-    for file_path in files_to_process:
-        try:
-            with open(file_path, mode='r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # Use apply_url as the unique key to handle duplicates
-                    if row.get('apply_url'):
-                        all_applications[row['apply_url']] = row
-        except Exception as e:
-            print(f"Warning: Could not read file {file_path}. Error: {e}")
+def detect_url_key(fieldnames: List[str]) -> str:
+    # prefer apply_url-like names
+    fn = detect_key_by_names(fieldnames, ("apply_url", "apply-url", "apply url"))
+    if fn:
+        return fn
+    # fallback heuristics
+    low_map = { (h or "").strip().lower(): h for h in fieldnames }
+    for k_low, orig in low_map.items():
+        if "apply" in k_low and ("url" in k_low or "link" in k_low):
+            return orig
+    for k_low, orig in low_map.items():
+        if "url" in k_low or "link" in k_low:
+            return orig
+    return fieldnames[0] if fieldnames else ""
 
-    return list(all_applications.values())
+def strip_tracking(u: str) -> str:
+    if not u:
+        return ""
+    try:
+        p = urllib.parse.urlparse(u)
+    except Exception:
+        return u.strip()
+    if not p.query:
+        return urllib.parse.urlunparse(p._replace(query=""))
+    keep = []
+    for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True):
+        lk = (k or "").lower(); lv = (v or "").lower()
+        if lk.startswith("utm_") or "simplify" in lk or "simplify" in lv:
+            continue
+        keep.append((k, v))
+    q = urllib.parse.urlencode(keep)
+    out = urllib.parse.urlunparse(p._replace(query=q))
+    if not q:
+        out = f"{p.scheme}://{p.netloc}{p.path}"
+    return out
 
+def norm_url(u: str) -> str:
+    u = (u or "").strip()
+    try:
+        p = urllib.parse.urlparse(u)
+        scheme = (p.scheme or "https").lower()
+        netloc = (p.netloc or "").lower()
+        path = (p.path or "").rstrip("/")
+        query = p.query or ""
+        return urllib.parse.urlunparse((scheme, netloc, path, "", query, ""))
+    except Exception:
+        return u.rstrip("/").lower()
 
-def detailed_analysis(all_data, output_csv_file):
-    """
-    Performs a detailed analysis of the combined application data.
-    """
-    print(f"--- Detailed Application Analysis ---")
-    
+# --- load and dedupe ---
+def load_all_applications(current_file: str, past_folder: str) -> Dict[str, Dict[str, str]]:
+    files = gather_files(current_file, past_folder)
+    combined: Dict[str, Dict[str, str]] = {}
+    for p in files:
+        rows = load_csv_rows(p)
+        if not rows:
+            continue
+        url_key = detect_url_key(list(rows[0].keys()))
+        if not url_key:
+            continue
+        for r in rows:
+            raw = r.get(url_key, "").strip()
+            if not raw:
+                continue
+            cleaned = strip_tracking(raw)
+            n = norm_url(cleaned)
+            # prefer first-seen (current_file should be first in gather_files)
+            if n not in combined:
+                combined[n] = {k.lower().strip(): v for k, v in r.items()}
+    return combined
+
+# --- analysis ---
+def analyze(combined: Dict[str, Dict[str, str]]) -> Tuple[Dict, List[Dict[str,str]]]:
+    total_unique = len(combined)
+    applied_rows = []
     status_counts = defaultdict(int)
-    total_applications = 0
+    company_counts = Counter()
 
-    for row in all_data:
-        # Normalize headers by lowercasing keys
-        row = {k.lower().strip(): v for k, v in row.items()}
-        if row.get('applied', '').strip().upper() == 'TRUE':
-            total_applications += 1
-            status = row.get('status', 'applied').strip().lower()
-            if not status:
-                status = 'applied'
-            status_counts[status] += 1
-    
-    if total_applications == 0:
-        print("No applications found in your master file or past data folder.")
-        return
+    for norm_u, r in combined.items():
+        # r already lowercased keys
+        applied_flag = False
+        applied_val = (r.get("applied") or "").strip().upper()
+        if applied_val in APPLIED_TRUE:
+            applied_flag = True
+        if not applied_flag:
+            # date applied heuristic
+            if (r.get("date applied") or r.get("date_applied") or r.get("date") or "").strip():
+                applied_flag = True
+        if not applied_flag:
+            st = (r.get("status") or "").strip().lower()
+            if any(k in st for k in STATUS_KEYWORDS):
+                applied_flag = True
 
-    # Calculate metrics
-    interviews = status_counts.get('interview', 0) + status_counts.get('offer', 0)
-    offers = status_counts.get('offer', 0)
-    ghosted = total_applications - interviews
+        if applied_flag:
+            applied_rows.append(r)
+            status_val = (r.get("status") or "").strip().lower() or "applied"
+            status_counts[status_val] += 1
+            company = (r.get("company") or "").strip() or "Unknown"
+            company_counts[company] += 1
 
-    interview_rate = (interviews / total_applications) * 100 if total_applications > 0 else 0
-    offer_rate = (offers / total_applications) * 100 if total_applications > 0 else 0
-    ghosted_rate = (ghosted / total_applications) * 100 if total_applications > 0 else 0
+    total_applied = len(applied_rows)
+    interviews = sum(v for k, v in status_counts.items() if "interview" in k or "offer" in k or "hired" in k or "accepted" in k)
+    offers = sum(v for k, v in status_counts.items() if "offer" in k or "accepted" in k or "hired" in k)
+    ghosted = total_applied - interviews
 
-    analysis_results = [
-        {'Metric': 'Total Unique Applications (All Time)', 'Value': total_applications},
-        {'Metric': '--- Funnel Rates ---', 'Value': '---'},
-        {'Metric': 'Interview Rate (%)', 'Value': f'{interview_rate:.2f}'},
-        {'Metric': 'Offer Rate (%)', 'Value': f'{offer_rate:.2f}'},
-        {'Metric': 'Ghosted Rate (Pending) (%)', 'Value': f'{ghosted_rate:.2f}'},
-        {'Metric': '--- Official Status Breakdown ---', 'Value': '---'},
+    interview_rate = (interviews / total_applied * 100) if total_applied else 0.0
+    offer_rate = (offers / total_applied * 100) if total_applied else 0.0
+    ghosted_rate = (ghosted / total_applied * 100) if total_applied else 0.0
+
+    metrics = {
+        "total_unique_rows": total_unique,
+        "total_applied": total_applied,
+        "interviews": interviews,
+        "offers": offers,
+        "ghosted": ghosted,
+        "interview_rate": interview_rate,
+        "offer_rate": offer_rate,
+        "ghosted_rate": ghosted_rate,
+        "status_counts": dict(status_counts),
+        "company_counts": dict(company_counts.most_common(30)),
+    }
+
+    return metrics, applied_rows
+
+# --- output ---
+def write_analysis_csv(metrics: Dict, out_file: str):
+    rows = [
+        {"Metric":"Total Unique Rows", "Value": metrics["total_unique_rows"]},
+        {"Metric":"Total Applied (detected)", "Value": metrics["total_applied"]},
+        {"Metric":"Interviews (incl offers)", "Value": metrics["interviews"]},
+        {"Metric":"Offers/Hired", "Value": metrics["offers"]},
+        {"Metric":"Ghosted / Pending", "Value": metrics["ghosted"]},
+        {"Metric":"Interview Rate (%)", "Value": f"{metrics['interview_rate']:.2f}"},
+        {"Metric":"Offer Rate (%)", "Value": f"{metrics['offer_rate']:.2f}"},
+        {"Metric":"Ghosted Rate (%)", "Value": f"{metrics['ghosted_rate']:.2f}"},
+        {"Metric":"--- Status Breakdown ---", "Value": ""},
     ]
-    
-    for status, count in sorted(status_counts.items()):
-        analysis_results.append({'Metric': f'Count: {status.capitalize()}', 'Value': count})
+    for k, v in sorted(metrics["status_counts"].items()):
+        rows.append({"Metric": f"Status: {k}", "Value": v})
+    rows.append({"Metric":"--- Top Companies (by applications) ---", "Value": ""})
+    for comp, cnt in metrics["company_counts"].items():
+        rows.append({"Metric": comp, "Value": cnt})
 
-    with open(output_csv_file, mode='w', newline='', encoding='utf-8') as f:
-        fieldnames = ['Metric', 'Value']
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    with open(out_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["Metric", "Value"])
         writer.writeheader()
-        writer.writerows(analysis_results)
+        writer.writerows(rows)
 
-    print(f"\n✅ Analysis complete! A detailed report has been saved to '{output_csv_file}'")
+def pretty_print(metrics: Dict, sample_applied: List[Dict[str,str]]):
+    print("\n" + "="*40)
+    print(" APPLICATION ANALYSIS SUMMARY ")
+    print("="*40)
+    print(f"Unique rows scanned: {metrics['total_unique_rows']}")
+    print(f"Detected applied entries: {metrics['total_applied']}")
+    print(f"Interviews (incl offers/hired): {metrics['interviews']} ({metrics['interview_rate']:.2f}%)")
+    print(f"Offers/Hired: {metrics['offers']} ({metrics['offer_rate']:.2f}%)")
+    print(f"Ghosted / pending: {metrics['ghosted']} ({metrics['ghosted_rate']:.2f}%)")
+    print("\nTop companies (up to 30):")
+    for comp, cnt in metrics["company_counts"].items():
+        print(f" - {comp:30} {cnt}")
+    if sample_applied:
+        print("\nSample applied rows (first 10):")
+        for r in sample_applied[:10]:
+            company = r.get("company") or ""
+            title = r.get("title") or ""
+            url = r.get("apply_url") or r.get("apply url") or ""
+            print(f"  • {company:25} | {title:30} | {url}")
+    print("\nReport saved to", OUTPUT_CSV)
+    print("="*40 + "\n")
 
+# --- main ---
+def main():
+    combined = load_all_applications(CURRENT_APPLICATIONS_FILE, PAST_DATA_FOLDER)
+    metrics, applied_rows = analyze(combined)
+    write_analysis_csv(metrics, OUTPUT_CSV)
+    pretty_print(metrics, applied_rows)
 
 if __name__ == "__main__":
-    CURRENT_APPLICATIONS_FILE = 'new_grad_swe_apply_links_applying.csv'
-    PAST_DATA_FOLDER = 'past_applied_data'
-    ANALYSIS_OUTPUT_FILE = 'application_analysis.csv'
-    
-    # Load all data first
-    all_my_applications = load_all_application_data(CURRENT_APPLICATIONS_FILE, PAST_DATA_FOLDER)
-    
-    # Run the analysis on the combined data
-    detailed_analysis(all_my_applications, ANALYSIS_OUTPUT_FILE)
+    main()

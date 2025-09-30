@@ -1,4 +1,4 @@
-# 🚀 My Job Journey: An Automated Application Tracker
+# 🚀 An Automated Application Tracker
 
 This project provides a suite of Python and Google Apps scripts to automate the process of finding, filtering, and analyzing new-graduate software engineering job applications. It transforms the job hunt from a chaotic spreadsheet nightmare into a streamlined, data-driven workflow.
 
@@ -57,13 +57,13 @@ The project is composed of several scripts and key data files that work together
 
 Perform these steps whenever you want to find and apply for new jobs.
 
-1.  **Find New Jobs:** Run these two scripts in your project folder to generate an up-to-date list of job openings.
+1.  **Find New Jobs:** Run this script in your project folder to generate an up-to-date list of job openings.
     ```bash
-    # Step A: Get the latest jobs from GitHub
+    # Get the latest jobs scraped from simplify GitHub (default: up to 7 days of posting age)
     python pull_apply_links.py
 
-    # Step B: Remove jobs you've already applied to (checks all past data)
-    python filter_jobs.py
+    # Use the optional --days argument to control how far back the job search goes. If the below is omitted, it'll scrape postings up to 3 days of posting age.
+    python pull_apply_links.py --days 3
     ```
 
 2.  **Track in Google Sheets:**

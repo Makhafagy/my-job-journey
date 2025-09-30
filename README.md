@@ -76,7 +76,11 @@ Perform these steps whenever you want to find and apply for new jobs.
     * **Archive the Old File:** If you have an existing `new_grad_swe_apply_links_applying.csv` file, rename it (e.g., to `applications_sept_2025.csv`) and move it into the `past_applied_data` folder.
     * **Name the New File:** Name the file you just downloaded exactly **`new_grad_swe_apply_links_applying.csv`** and place it in the main project folder.
 
-4.  **Run Analysis & Update Status:**
+4.  **Prepare Local File & Run Analysis:**
+    * Prepare Tracker File: Run this to ensure your downloaded master file has the necessary Date Applied and Status columns for analysis.
+        ```bash
+        python prepare_tracker.py
+        ```
     * Run the analysis script to see your updated, all-time statistics.
         ```bash
         python detailed_analysis.py

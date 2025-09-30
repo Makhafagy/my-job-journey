@@ -4,7 +4,8 @@ import re
 import sys
 import urllib.parse
 from typing import Dict, List, Optional, Set, Tuple
-import os  # Added for file existence check
+import os
+import argparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -36,12 +37,12 @@ ARROW_GLYPHS = ("↳", "↠", "➜", "→", "⤷", "⮑", "›", "»")
 
 CSV_FIELDS = [
     "flags", "company", "title", "location", "apply_url",
-    "age",  # numeric (days)
+    "age",
     "no_sponsorship", "requires_us_citizenship", "faang_plus",
     "closed", "advanced_degree",
 ]
 
-# ---------- NEW: US Location Filtering Config ----------
+# ---------- US Location Filtering Config ----------
 US_STATE_CODES = {
     'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID',
     'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS',
@@ -117,11 +118,11 @@ def age_to_days(s: str) -> Optional[int]:
     if not s:
         return None
     s = (s.replace("mth", "mo")
-           .replace("year", "yr").replace("years", "yr")
-           .replace("month", "mo").replace("months", "mo")
-           .replace("week", "w").replace("weeks", "w")
-           .replace("day", "d").replace("days", "d")
-           .replace("hour", "h").replace("hours", "h"))
+         .replace("year", "yr").replace("years", "yr")
+         .replace("month", "mo").replace("months", "mo")
+         .replace("week", "w").replace("weeks", "w")
+         .replace("day", "d").replace("days", "d")
+         .replace("hour", "h").replace("hours", "h"))
     m = re.search(r"\b(\d+)\s*(h|d|w|mo|yr|y)\b", s) or re.search(r"\b(\d+)(h|d|w|mo|yr|y)\b", s)
     if not m:
         return None
@@ -265,14 +266,14 @@ def dedupe(rows: List[Dict]) -> List[Dict]:
         out.append(r)
     return out
 
-# ---------- NEW: Function to read previously applied jobs ----------
+# ---------- Function to read previously applied jobs ----------
 def load_applied_urls(applied_csv_path: str) -> Set[str]:
     """Reads the CSV with application tracking and returns a set of normalized URLs for jobs already applied to."""
     applied_urls = set()
     if not os.path.exists(applied_csv_path):
         print(f"Info: Applied jobs file not found at '{applied_csv_path}'. Skipping.")
         return applied_urls
-    
+
     try:
         with open(applied_csv_path, "r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -286,11 +287,11 @@ def load_applied_urls(applied_csv_path: str) -> Set[str]:
                         applied_urls.add(norm_url_for_dedupe(url))
     except Exception as e:
         print(f"Warning: Could not read applied jobs file '{applied_csv_path}'. Error: {e}")
-        
+
     print(f"Found {len(applied_urls)} previously applied jobs.")
     return applied_urls
 
-# ---------- NEW: Enhanced filtering function ----------
+# ---------- Enhanced filtering function ----------
 def is_us_location(location: str) -> bool:
     """Checks if a location string corresponds to a US location."""
     loc_upper = (location or "").upper()
@@ -298,16 +299,16 @@ def is_us_location(location: str) -> bool:
     # Exclude if a non-US keyword is present
     if any(keyword.upper() in loc_upper for keyword in NON_US_KEYWORDS):
         return False
-    
+
     # Include if a US keyword is present
     if any(keyword.upper() in loc_upper for keyword in US_KEYWORDS):
         return True
-    
+
     # Check for state codes using regex to match whole words
     # This avoids matching "CA" in "Canada"
     if any(re.search(r'\b' + code + r'\b', loc_upper) for code in US_STATE_CODES):
         return True
-    
+
     # Heuristic for "Remote" - include if it doesn't mention a non-US country
     if "REMOTE" in loc_upper:
         return True
@@ -315,24 +316,24 @@ def is_us_location(location: str) -> bool:
     # Default to excluding if no positive US indicators are found
     return False
 
-def filter_rows(rows: List[Dict], applied_urls: Set[str]) -> List[Dict]:
+def filter_rows(rows: List[Dict], applied_urls: Set[str], max_age_days: int) -> List[Dict]:
     """Applies all filtering logic: age, location, applied status, and flags."""
     out = []
     for r in rows:
         # 1. Filter out closed or advanced degree roles
         if r.get("closed") or r.get("advanced_degree"):
             continue
-        
+
         # 2. Filter out jobs already applied to
         normalized_url = norm_url_for_dedupe(r["apply_url"])
         if normalized_url in applied_urls:
             continue
 
-        # 3. Filter jobs older than 7 days
+        # 3. Filter jobs older than max_age_days
         age = r.get("age")
-        if age is None or age > 7:
+        if age is None or age > max_age_days:
             continue
-            
+
         # 4. Filter for US-only locations
         if not is_us_location(r.get("location", "")):
             continue
@@ -354,15 +355,31 @@ def sort_rows(rows: List[Dict]) -> List[Dict]:
 
 # ---------- Main ----------
 def main():
+    # Argument Parsing for job age
+    parser = argparse.ArgumentParser(description="Scrape and filter new-grad SWE jobs.")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=7,
+        help="Max age of the job posting in days (default: 7)."
+    )
+    args = parser.parse_args()
+    max_age_days = args.days
+
     # Define input (your sheet) and output (new filtered list) filenames
     applied_csv = "new_grad_swe_apply_links_applying.csv"
-    out_csv = sys.argv[1] if len(sys.argv) > 1 else "new_grad_swe_apply_links.csv"
+    # Update output file path logic to work around argparse consuming positional args
+    if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
+        out_csv = sys.argv[1]
+    else:
+        out_csv = "new_grad_swe_apply_links.csv"
+
 
     # --- Pipeline updated ---
-    applied_urls = load_applied_urls(applied_csv) # Load applied jobs
-    rows = load_active_swe_rows()                 # Scrape all active SWE jobs
+    applied_urls = load_applied_urls(applied_csv)
+    rows = load_active_swe_rows()
     rows = dedupe(rows)
-    rows = filter_rows(rows, applied_urls)         # Apply the new, combined filters
+    rows = filter_rows(rows, applied_urls, max_age_days)  # Pass max_age_days
     rows = sort_rows(rows)
 
     # Defaults & cleanup
@@ -382,9 +399,10 @@ def main():
             out["flags"] = flags_emoji_row(r)
             w.writerow(out)
 
+    # Update print statement to reflect the actual max age used
     print(f"✅ Wrote {len(rows)} new, filtered, direct ATS links to {out_csv}")
     print(f"   - Ignored {len(applied_urls)} jobs you already applied to.")
-    print("   - Kept only jobs in the US posted in the last 7 days.")
+    print(f"   - Kept only jobs in the US posted in the last {max_age_days} days.")
 
 if __name__ == "__main__":
     main()
